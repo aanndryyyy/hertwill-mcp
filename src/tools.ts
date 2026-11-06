@@ -171,6 +171,24 @@ const slimImages = (data: unknown) =>
       )
     : data;
 
+/** Public product page on hertwill.com. The API returns only the slug, so the URL is built from it. */
+const PRODUCT_PAGE_BASE = "https://hertwill.com/product/";
+const productUrl = (slug: unknown) =>
+  typeof slug === "string" && slug ? PRODUCT_PAGE_BASE + encodeURIComponent(slug) : undefined;
+
+/** Add `url` (the product page) right after `slug` on a product object. */
+const withUrl = (item: any) => {
+  const url = productUrl(item?.slug);
+  if (!url) return item;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(item)) {
+    out[k] = v;
+    if (k === "slug") out.url = url;
+  }
+  return out;
+};
+const withUrls = (data: unknown) => (Array.isArray(data) ? data.map(withUrl) : data);
+
 const LANGS = [
   "EN", "BG", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR",
   "HU", "IT", "LT", "LV", "NL", "PL", "PT", "RO", "SE", "SK",
@@ -219,8 +237,9 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Search / browse products",
       description:
         "Search or browse the Hertwill dropshipping catalog with filters, sorting and pagination. " +
-        "Pass `query` for full-text search; omit it to browse. Returns compact product summaries (no HTML description, " +
-        "no variations) — call get_product for full details and variation ids." +
+        "Pass `query` for full-text search; omit it to browse. Returns compact product summaries with each product's " +
+        "public page `url` (link to it when you mention a product), without the HTML description or " +
+        "variations. Call get_product for full details and variation ids." +
         priceNote,
       inputSchema: z.object({
         query: z.string().min(1).optional().describe("Full-text search query. Omit to browse all products."),
@@ -240,7 +259,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       });
       let data = res.data;
       if (!include_description) data = omitFields(data, ["description"]);
-      data = slimImages(data);
+      data = withUrls(slimImages(data));
       const meta = { ...(res.meta ?? {}) };
       if (!include_facets) delete meta.facets;
       delete meta.request_id;
@@ -254,7 +273,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Get product details",
       description:
         "Get full details for one catalog product by numeric id or slug, including variations (with their catalog " +
-        "variation ids), images, attributes, shipping, packaging and compliance data." +
+        "variation ids), its public page `url`, images, attributes, shipping, packaging and compliance data." +
         priceNote,
       inputSchema: z.object({
         id_or_slug: z.string().min(1).describe("Numeric product id (e.g. '11180') or product slug."),
@@ -271,7 +290,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         ? `/v1/products/${id_or_slug}`
         : `/v1/products/slug/${encodeURIComponent(id_or_slug)}`;
       const res = await client.request<any>("GET", path, { query: { lang } });
-      return { data: res.data, meta: res.meta ?? {} };
+      return { data: withUrl(res.data), meta: res.meta ?? {} };
     }),
   );
 
@@ -372,7 +391,8 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       description:
         "List products in your store's import list. Defaults to status 'not-synced' (products not yet in your store); " +
         "pass status 'synced' for already-synced ones. Each item's `id` is the catalog product id to use with " +
-        "sync_product; `variations` holds the (id, dropship_id) pairs. Requires HERTWILL_API_KEY.",
+        "sync_product; `url` is its public product page; `variations` holds the (id, dropship_id) pairs. " +
+        "Requires HERTWILL_API_KEY.",
       inputSchema: z.object({
         status: z
           .enum(["not-synced", "syncing", "synced", "sync-failed", "approved", "rejected", "pending", "approval-required"])
@@ -391,7 +411,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       const res: any = await client.request("GET", "/v1/import-list", { query: q as Query, requireKey: true });
       let data = res.data;
       if (!include_description) data = omitFields(data, ["description"]);
-      data = slimImages(data);
+      data = withUrls(slimImages(data));
       return { data: data ?? [], pagination: res.meta?.pagination };
     }),
   );

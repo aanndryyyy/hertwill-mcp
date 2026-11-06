@@ -47,7 +47,8 @@ const handle = serveStdio(
         instructions:
           "Tools for the Hertwill dropshipping platform. Typical flow: search_products → get_product → " +
           "add_to_import_list → sync_product (with an ABSOLUTE selling price) → get_sync_status. " +
-          "Prices are wholesale EUR. Import-list and sync tools need HERTWILL_API_KEY.",
+          "Prices are wholesale EUR. Import-list and sync tools need HERTWILL_API_KEY. " +
+          "Product results include a `url` (the public product page): link to it when you mention a product.",
       },
     );
     registerTools(server, client);

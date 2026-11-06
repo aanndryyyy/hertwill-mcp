@@ -24,6 +24,7 @@ const ref = z.looseObject({ id: id.optional(), name: z.string(), slug: z.string(
 const productSummary = z.looseObject({
   id: z.number().describe("Catalog product id."),
   slug: z.string(),
+  url: z.string().optional().describe("Public product page on hertwill.com; link to it when showing the product."),
   name: z.string(),
   sku: z.string().nullable().optional(),
   price: money.optional().describe("Wholesale price in EUR; null without an API key."),
@@ -60,6 +61,7 @@ export const getProductOutput = z.object({
   data: z.looseObject({
     id: z.number(),
     slug: z.string(),
+    url: z.string().optional().describe("Public product page on hertwill.com; link to it when showing the product."),
     name: z.string(),
     price: money.optional(),
     sale_price: money.optional(),
@@ -93,6 +95,7 @@ export const brandShippingOutput = z.object({
 
 const importListItem = z.looseObject({
   id: z.number().describe("Catalog product id; pass this to sync_product."),
+  url: z.string().optional().describe("Public product page on hertwill.com; link to it when showing the product."),
   variations: z.array(variation).nullable().optional(),
 });
 
