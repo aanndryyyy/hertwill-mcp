@@ -171,8 +171,13 @@ const slimImages = (data: unknown) =>
       )
     : data;
 
-/** Public product page on hertwill.com. The API returns only the slug, so the URL is built from it. */
+/**
+ * Public product page on hertwill.com. The API returns only the slug, so the URL is built from it.
+ * List results carry the template once (`product_url_template`) instead of a full URL per item, which would repeat
+ * every slug and cost ~10% of a page's tokens; get_product, which returns a single product, gets the full `url`.
+ */
 const PRODUCT_PAGE_BASE = "https://hertwill.com/product/";
+const PRODUCT_URL_TEMPLATE = `${PRODUCT_PAGE_BASE}{slug}`;
 const productUrl = (slug: unknown) =>
   typeof slug === "string" && slug ? PRODUCT_PAGE_BASE + encodeURIComponent(slug) : undefined;
 
@@ -187,7 +192,6 @@ const withUrl = (item: any) => {
   }
   return out;
 };
-const withUrls = (data: unknown) => (Array.isArray(data) ? data.map(withUrl) : data);
 
 const LANGS = [
   "EN", "BG", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR",
@@ -237,9 +241,9 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Search / browse products",
       description:
         "Search or browse the Hertwill dropshipping catalog with filters, sorting and pagination. " +
-        "Pass `query` for full-text search; omit it to browse. Returns compact product summaries with each product's " +
-        "public page `url` (link to it when you mention a product), without the HTML description or " +
-        "variations. Call get_product for full details and variation ids." +
+        "Pass `query` for full-text search; omit it to browse. Returns compact product summaries without the HTML " +
+        "description or variations; call get_product for full details and variation ids. Link a product as " +
+        "`meta.product_url_template` with its `slug` filled in." +
         priceNote,
       inputSchema: z.object({
         query: z.string().min(1).optional().describe("Full-text search query. Omit to browse all products."),
@@ -259,11 +263,11 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       });
       let data = res.data;
       if (!include_description) data = omitFields(data, ["description"]);
-      data = withUrls(slimImages(data));
+      data = slimImages(data);
       const meta = { ...(res.meta ?? {}) };
       if (!include_facets) delete meta.facets;
       delete meta.request_id;
-      return { data, meta };
+      return { data, meta: { product_url_template: PRODUCT_URL_TEMPLATE, ...meta } };
     }),
   );
 
@@ -391,7 +395,8 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       description:
         "List products in your store's import list. Defaults to status 'not-synced' (products not yet in your store); " +
         "pass status 'synced' for already-synced ones. Each item's `id` is the catalog product id to use with " +
-        "sync_product; `url` is its public product page; `variations` holds the (id, dropship_id) pairs. " +
+        "sync_product; `variations` holds the (id, dropship_id) pairs. Link a product as `product_url_template` with " +
+        "its `slug` filled in. " +
         "Requires HERTWILL_API_KEY.",
       inputSchema: z.object({
         status: z
@@ -411,8 +416,8 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       const res: any = await client.request("GET", "/v1/import-list", { query: q as Query, requireKey: true });
       let data = res.data;
       if (!include_description) data = omitFields(data, ["description"]);
-      data = withUrls(slimImages(data));
-      return { data: data ?? [], pagination: res.meta?.pagination };
+      data = slimImages(data);
+      return { data: data ?? [], pagination: res.meta?.pagination, product_url_template: PRODUCT_URL_TEMPLATE };
     }),
   );
 

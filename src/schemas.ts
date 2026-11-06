@@ -24,7 +24,6 @@ const ref = z.looseObject({ id: id.optional(), name: z.string(), slug: z.string(
 const productSummary = z.looseObject({
   id: z.number().describe("Catalog product id."),
   slug: z.string(),
-  url: z.string().optional().describe("Public product page on hertwill.com; link to it when showing the product."),
   name: z.string(),
   sku: z.string().nullable().optional(),
   price: money.optional().describe("Wholesale price in EUR; null without an API key."),
@@ -52,6 +51,7 @@ const category = z.looseObject({
 export const searchProductsOutput = z.object({
   data: z.array(productSummary),
   meta: z.looseObject({
+    product_url_template: z.string().describe("Public product page URL; replace {slug} with the product's slug."),
     pagination: pagination.optional(),
     facets: z.array(z.unknown()).optional().describe("Only present when include_facets is true."),
   }),
@@ -95,13 +95,13 @@ export const brandShippingOutput = z.object({
 
 const importListItem = z.looseObject({
   id: z.number().describe("Catalog product id; pass this to sync_product."),
-  url: z.string().optional().describe("Public product page on hertwill.com; link to it when showing the product."),
   variations: z.array(variation).nullable().optional(),
 });
 
 export const listImportListOutput = z.object({
   data: z.array(importListItem),
   pagination: pagination.optional(),
+  product_url_template: z.string().describe("Public product page URL; replace {slug} with the product's slug."),
 });
 
 export const addToImportListOutput = z.object({
