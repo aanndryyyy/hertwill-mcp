@@ -51,6 +51,16 @@ if (process.env.HERTWILL_API_KEY) {
   }
   // Validation path of sync_product: an unknown variation id is rejected before any sync is started.
   if (il.data?.[0]) await call("sync_product", { product_id: il.data[0].id, selling_price: 999, variation_prices: { "1": 1 } }, { expectError: true });
+  // Same for a product WITH variants: the error must list the real variation ids resolved from the import list.
+  const all = JSON.parse(await call("list_import_list", { status: "approved", per_page: 100 }));
+  const withVariants = all.data?.find((p) => p.variations?.length);
+  if (withVariants) {
+    const text = await call("sync_product", { product_id: withVariants.id, selling_price: 999, variation_prices: { "1": 1 } }, { expectError: true });
+    const expected = String(withVariants.variations[0].id);
+    const resolved = text.includes("UNKNOWN_VARIATION") && text.includes(expected);
+    if (!resolved) failures++;
+    console.log(`${resolved ? "PASS" : "FAIL"} variant pairs resolved for product ${withVariants.id} (expects variation ${expected} listed)`);
+  }
 } else {
   console.log("HERTWILL_API_KEY not set: skipping authenticated tools");
   await call("get_sync_health", {}, { expectError: true });
