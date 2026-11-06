@@ -15,9 +15,9 @@ import * as out from "./schemas.js";
 
 type ToolResult = CallToolResult;
 
-/** Same JSON as text (for clients that ignore structured output) and as `structuredContent` (typed by `outputSchema`). */
+/** Same JSON as text (compact: indentation costs ~30% more tokens) and as `structuredContent` (typed by `outputSchema`). */
 const ok = (data: unknown): ToolResult => ({
-  content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  content: [{ type: "text", text: JSON.stringify(data) }],
   structuredContent: data as Record<string, unknown>,
 });
 
@@ -26,7 +26,7 @@ const fail = (err: unknown): ToolResult => {
     const payload: Record<string, unknown> = { error: { status: err.status, code: err.code, message: err.message } };
     if (err.details !== undefined) (payload.error as any).details = err.details;
     if (err.requestId) (payload.error as any).request_id = err.requestId;
-    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }], isError: true };
+    return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true };
   }
   return { content: [{ type: "text", text: `Error: ${(err as Error)?.message ?? String(err)}` }], isError: true };
 };
