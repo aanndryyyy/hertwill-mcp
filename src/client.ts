@@ -41,12 +41,9 @@ export class HertwillClient {
     return Boolean(this.apiKey);
   }
 
-  async request<T = unknown>(
-    method: "GET" | "POST" | "DELETE",
-    path: string,
-    { query, body, requireKey = false }: { query?: Query; body?: unknown; requireKey?: boolean } = {},
-  ): Promise<T> {
-    if (requireKey && !this.apiKey) {
+  /** Throw API_KEY_MISSING unless a key is configured. */
+  assertKey(): void {
+    if (!this.apiKey) {
       throw new HertwillApiError(
         401,
         "API_KEY_MISSING",
@@ -54,6 +51,14 @@ export class HertwillClient {
           "(create a store-scoped key at https://hertwill.com in your account dashboard).",
       );
     }
+  }
+
+  async request<T = unknown>(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    { query, body, requireKey = false }: { query?: Query; body?: unknown; requireKey?: boolean } = {},
+  ): Promise<T> {
+    if (requireKey) this.assertKey();
 
     const url = new URL(this.baseUrl + path);
     for (const [k, v] of Object.entries(query ?? {})) {

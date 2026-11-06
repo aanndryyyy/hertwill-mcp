@@ -36,7 +36,7 @@ await call("get_product", { id_or_slug: first.slug });
 await call("get_product", { id_or_slug: "999999999" }, { expectError: true });
 await call("list_categories");
 await call("get_category", { id_or_slug: "apparel-accessories" });
-const brands = JSON.parse(await call("list_brands"));
+const { brands } = JSON.parse(await call("list_brands"));
 await call("get_brand", { brand_id: Number(brands[0].id) });
 await call("get_brand_shipping_prices", { brand_id: Number(brands[0].id), destination: "FI" });
 

@@ -1,14 +1,24 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  inputRequired,
+  inputResponse,
+  isInputRequiredResult,
+  type CallToolResult,
+  type InputRequiredResult,
+  type McpServer,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as z from "zod";
 import { HertwillApiError, HertwillClient, type Query } from "./client.js";
+import * as out from "./schemas.js";
 
-type ToolResult = {
-  content: { type: "text"; text: string }[];
-  isError?: boolean;
-};
+type ToolResult = CallToolResult;
 
+/** Same JSON as text (for clients that ignore structured output) and as `structuredContent` (typed by `outputSchema`). */
 const ok = (data: unknown): ToolResult => ({
   content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  structuredContent: data as Record<string, unknown>,
 });
 
 const fail = (err: unknown): ToolResult => {
@@ -21,16 +31,124 @@ const fail = (err: unknown): ToolResult => {
   return { content: [{ type: "text", text: `Error: ${(err as Error)?.message ?? String(err)}` }], isError: true };
 };
 
-/** Wrap a handler so API errors come back as tool errors the model can read and act on. */
+/**
+ * Wrap a handler so API errors come back as tool errors the model can read and act on.
+ * A handler may also return an `input_required` result (a confirmation request), which is passed through untouched.
+ */
 const run =
-  <A>(fn: (args: A) => Promise<unknown>) =>
-  async (args: A): Promise<ToolResult> => {
+  <A>(fn: (args: A, ctx: ServerContext) => Promise<unknown>) =>
+  async (args: A, ctx: ServerContext): Promise<ToolResult | InputRequiredResult> => {
     try {
-      return ok(await fn(args));
+      const data = await fn(args, ctx);
+      return isInputRequiredResult(data) ? data : ok(data);
     } catch (err) {
       return fail(err);
     }
   };
+
+// ───────────────────────────── User confirmation ─────────────────────────────
+
+const confirmationSchema = z.object({
+  confirm: z.boolean().describe("Tick to go ahead."),
+});
+
+/**
+ * True when this request's client can show a form elicitation (2026-07-28 envelope, else the 2025 handshake).
+ * `elicitation: {}` means form support (the 2025-06-18 shape); a client that declares only `url` cannot show our form.
+ */
+const canElicit = (server: McpServer, ctx: ServerContext): boolean => {
+  const envelope = ctx.mcpReq.envelope as Record<string, any> | undefined;
+  const el = (envelope?.[CLIENT_CAPABILITIES_META_KEY] ?? server.server.getClientCapabilities())?.elicitation;
+  if (!el || typeof el !== "object") return false;
+  return Boolean(el.form) || Object.keys(el).length === 0;
+};
+
+// The confirmation answer comes back from the client, so on its own it proves nothing: a client could send
+// `inputResponses: { confirm: … }` on the first call, or confirm one set of arguments and retry with another.
+// So the server mints a `requestState` that binds the prompt to the exact tool + arguments (HMAC with a
+// per-process key, 10-minute expiry) and only honours an answer that arrives with a valid state for those args.
+const STATE_KEY = randomBytes(32);
+const STATE_TTL_MS = 10 * 60_000;
+
+/** JSON with sorted object keys, so the same arguments always hash the same way. */
+const stableJson = (v: unknown): string =>
+  Array.isArray(v)
+    ? `[${v.map(stableJson).join(",")}]`
+    : v && typeof v === "object"
+      ? `{${Object.keys(v)
+          .sort()
+          .filter((k) => (v as any)[k] !== undefined)
+          .map((k) => `${JSON.stringify(k)}:${stableJson((v as any)[k])}`)
+          .join(",")}}`
+      : JSON.stringify(v);
+
+const argsDigest = (tool: string, args: unknown) =>
+  createHash("sha256").update(`${tool}\n${stableJson(args)}`).digest("base64url");
+const sign = (payload: string) => createHmac("sha256", STATE_KEY).update(payload).digest("base64url");
+
+const mintState = (tool: string, args: unknown): string => {
+  const payload = Buffer.from(JSON.stringify({ d: argsDigest(tool, args), exp: Date.now() + STATE_TTL_MS })).toString(
+    "base64url",
+  );
+  return `${payload}.${sign(payload)}`;
+};
+
+const stateMatches = (state: unknown, tool: string, args: unknown): boolean => {
+  if (typeof state !== "string") return false;
+  const [payload, mac] = state.split(".");
+  if (!payload || !mac) return false;
+  const expected = Buffer.from(sign(payload));
+  const given = Buffer.from(mac);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return false;
+  try {
+    const { d, exp } = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof exp === "number" && exp > Date.now() && d === argsDigest(tool, args);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Ask the user to confirm a write before it happens, using a multi-round-trip elicitation (protocol 2026-07-28;
+ * the SDK's legacy shim turns it into a server→client `elicitation/create` for 2025-era clients).
+ *
+ * Returns `"go"` when the user confirmed these exact arguments (or the client cannot show a form, in which case
+ * the host's own tool approval is the gate), `"declined"` / `"cancelled"` when the user said no or dismissed the
+ * prompt, or the `input_required` result to send back.
+ */
+const confirmWrite = (
+  server: McpServer,
+  ctx: ServerContext,
+  tool: string,
+  args: unknown,
+  message: string,
+): "go" | "declined" | "cancelled" | InputRequiredResult => {
+  if (!canElicit(server, ctx)) return "go";
+  const answer = inputResponse(ctx.mcpReq.inputResponses, "confirm");
+  // No answer yet, or an answer not bound to a prompt we issued for these args: (re-)ask.
+  if (answer.kind !== "elicit" || !stateMatches(ctx.mcpReq.requestState(), tool, args)) {
+    return inputRequired({
+      inputRequests: { confirm: inputRequired.elicit({ message, requestedSchema: confirmationSchema }) },
+      requestState: mintState(tool, args),
+    });
+  }
+  if (answer.action === "cancel") return "cancelled";
+  const parsed = confirmationSchema.safeParse(answer.content ?? {});
+  return answer.action === "accept" && parsed.success && parsed.data.confirm ? "go" : "declined";
+};
+
+/** The tool result when the user did not confirm. */
+const notConfirmed = (decision: "declined" | "cancelled", what: Record<string, unknown>, nothing: string) => ({
+  status: decision,
+  ...what,
+  message:
+    decision === "declined"
+      ? `The user declined; ${nothing}. Do not retry unless the user asks.`
+      : `The user dismissed the confirmation without answering; ${nothing}.`,
+});
+
+const fmtPrice = (v: unknown) =>
+  typeof v === "number" || (typeof v === "string" && v !== "") ? `${v} EUR` : "hidden (no API key)";
 
 /** Remove fields from every object in `data` (an array) to keep list responses compact. */
 const omitFields = (data: unknown, fields: string[]) =>
@@ -86,6 +204,13 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
     ? ""
     : " Note: wholesale `price` is null unless HERTWILL_API_KEY is configured.";
 
+  /** "\"Name\" (#id)" for confirmation messages; falls back to the bare id if the lookup fails. */
+  const productName = (productId: number) =>
+    client.request<any>("GET", `/v1/products/${productId}`).then(
+      (r) => (r.data?.name ? `"${r.data.name}" (#${productId})` : `product #${productId}`),
+      () => `product #${productId}`,
+    );
+
   // ───────────────────────────── Catalog (public) ─────────────────────────────
 
   server.registerTool(
@@ -106,6 +231,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
           .optional()
           .describe("Include facet counts (brands, categories, attributes…) for refining filters (default false; large)."),
       }),
+      outputSchema: out.searchProductsOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ query, include_description, include_facets, ...filters }) => {
@@ -137,13 +263,15 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
           .optional()
           .describe("Return the description in this language. Names are not translated."),
       }),
+      outputSchema: out.getProductOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ id_or_slug, lang }) => {
       const path = /^\d+$/.test(id_or_slug)
         ? `/v1/products/${id_or_slug}`
         : `/v1/products/slug/${encodeURIComponent(id_or_slug)}`;
-      return client.request("GET", path, { query: { lang } });
+      const res = await client.request<any>("GET", path, { query: { lang } });
+      return { data: res.data, meta: res.meta ?? {} };
     }),
   );
 
@@ -153,9 +281,10 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "List categories",
       description: "List the product category tree (id, slug, name, children). Use slugs as the `category` filter.",
       inputSchema: z.object({}),
+      outputSchema: out.listCategoriesOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    run(async () => (await client.request<any>("GET", "/v1/categories")).data),
+    run(async () => ({ categories: (await client.request<any>("GET", "/v1/categories")).data ?? [] })),
   );
 
   server.registerTool(
@@ -164,6 +293,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Get category",
       description: "Get one category by id or slug.",
       inputSchema: z.object({ id_or_slug: z.string().min(1) }),
+      outputSchema: out.getCategoryOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ id_or_slug }) => (await client.request<any>("GET", `/v1/categories/${encodeURIComponent(id_or_slug)}`)).data),
@@ -179,11 +309,14 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       inputSchema: z.object({
         include_description: z.boolean().optional().describe("Include brand descriptions (default false)."),
       }),
+      outputSchema: out.listBrandsOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ include_description }) => {
       const data = (await client.request<any>("GET", "/v1/brands")).data;
-      return include_description ? data : omitFields(data, ["description", "return_policy", "responsible_person", "gpsr"]);
+      return {
+        brands: include_description ? data : omitFields(data, ["description", "return_policy", "responsible_person", "gpsr"]),
+      };
     }),
   );
 
@@ -193,6 +326,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Get brand",
       description: "Get full details for one brand by numeric id, including return policy, GPSR and responsible person.",
       inputSchema: z.object({ brand_id: z.number().int().describe("Numeric brand id.") }),
+      outputSchema: out.getBrandOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ brand_id }) => (await client.request<any>("GET", `/v1/brands/${brand_id}`)).data),
@@ -213,16 +347,19 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
           .optional()
           .describe("ISO 3166-1 alpha-2 destination country to filter to (e.g. 'FI')."),
       }),
+      outputSchema: out.brandShippingOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ brand_id, destination }) => {
       const lists = (await client.request<any>("GET", `/v1/brands/${brand_id}/shipping-price-lists`)).data;
-      if (!destination || !Array.isArray(lists)) return lists;
+      if (!destination || !Array.isArray(lists)) return { price_lists: lists ?? [] };
       const dest = destination.toUpperCase();
-      return lists.map((l: any) => ({
-        ...l,
-        shipping_prices: (l.shipping_prices ?? []).filter((p: any) => p.dest_iso_code === dest),
-      }));
+      return {
+        price_lists: lists.map((l: any) => ({
+          ...l,
+          shipping_prices: (l.shipping_prices ?? []).filter((p: any) => p.dest_iso_code === dest),
+        })),
+      };
     }),
   );
 
@@ -247,6 +384,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         page,
         per_page: perPage,
       }),
+      outputSchema: out.listImportListOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ include_description, ...q }) => {
@@ -254,7 +392,7 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       let data = res.data;
       if (!include_description) data = omitFields(data, ["description"]);
       data = slimImages(data);
-      return { data, pagination: res.meta?.pagination };
+      return { data: data ?? [], pagination: res.meta?.pagination };
     }),
   );
 
@@ -268,24 +406,40 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       inputSchema: z.object({
         product_ids: z.array(z.number().int()).min(1).max(50).describe("Catalog product ids to add."),
       }),
+      outputSchema: out.addToImportListOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    run(async ({ product_ids }) =>
-      (await client.request<any>("POST", "/v1/import-list/products", { body: { product_ids }, requireKey: true })).data,
-    ),
+    run(async ({ product_ids }) => ({
+      results:
+        (await client.request<any>("POST", "/v1/import-list/products", { body: { product_ids }, requireKey: true }))
+          .data ?? [],
+    })),
   );
 
   server.registerTool(
     "remove_from_import_list",
     {
       title: "Remove product from import list",
-      description: "Remove a product from your store's import list. Requires HERTWILL_API_KEY.",
+      description:
+        "Remove a product from your store's import list. When the client supports it, the user is asked to confirm " +
+        "first; if they decline, nothing is removed and the result has status 'declined' (or 'cancelled' if they " +
+        "dismissed the prompt). Requires HERTWILL_API_KEY.",
       inputSchema: z.object({
         product_id: z.number().int().describe("Catalog product id (the import-list item's `id`)."),
       }),
+      outputSchema: out.removeFromImportListOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
-    run(async ({ product_id }) => {
+    run(async (args, ctx) => {
+      const { product_id } = args;
+      client.assertKey();
+      if (canElicit(server, ctx)) {
+        const name = await productName(product_id);
+        const decision = confirmWrite(server, ctx, "remove_from_import_list", args, `Remove ${name} from your Hertwill import list?`);
+        if (decision === "declined" || decision === "cancelled")
+          return notConfirmed(decision, { product_id }, "nothing was removed");
+        if (decision !== "go") return decision;
+      }
       const res = await client.request<any>("DELETE", `/v1/import-list/products/${product_id}`, { requireKey: true });
       return res?.data ?? { product_id, removed: true };
     }),
@@ -302,7 +456,9 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         "`selling_price` is the ABSOLUTE retail price in your store currency (e.g. 24.99) — NOT a markup multiplier or " +
         "percentage; it must be at or above the wholesale price. For products with variants, the variation (id, dropship_id) " +
         "pairs are resolved automatically (the product is added to the import list first if needed); every variant gets " +
-        "`selling_price` unless overridden in `variation_prices`. Runs asynchronously — check progress with get_sync_status. " +
+        "`selling_price` unless overridden in `variation_prices`. When the client supports it, the user is asked to confirm " +
+        "the product, price and wholesale cost first; if they decline, nothing is synced and the result has status " +
+        "'declined' (or 'cancelled' if they dismissed the prompt). Either way the product stays in the import list. Runs asynchronously — check progress with get_sync_status. " +
         "Requires HERTWILL_API_KEY.",
       inputSchema: z.object({
         product_id: z
@@ -320,14 +476,20 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         currency: z.string().optional().describe("Store currency code, e.g. 'EUR'. Defaults to the store's currency."),
         lang: z.string().optional().describe("Language to publish the description in, e.g. 'EN'."),
       }),
+      outputSchema: out.syncProductOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    run(async ({ product_id, selling_price, variation_prices, currency, lang }) => {
+    run(async (args, ctx) => {
+      const { product_id, selling_price, variation_prices, currency, lang } = args;
       // Idempotent add: guarantees the product is in the import list and returns the full (id, dropship_id) pairing.
-      const added = await client.request<any>("POST", "/v1/import-list/products", {
-        body: { product_ids: [product_id] },
-        requireKey: true,
-      });
+      // It only stages the product (nothing reaches the store), so it runs before the confirmation: that way invalid
+      // input is rejected before the user is asked anything.
+      const [added, product] = await Promise.all([
+        client.request<any>("POST", "/v1/import-list/products", { body: { product_ids: [product_id] }, requireKey: true }),
+        canElicit(server, ctx)
+          ? client.request<any>("GET", `/v1/products/${product_id}`).then((r) => r.data, () => undefined)
+          : undefined,
+      ]);
       const entry = (added.data ?? []).find((d: any) => d.product_id === product_id) ?? added.data?.[0];
       if (!entry || entry.status === "not_found" || entry.status === "error") {
         throw new HertwillApiError(
@@ -348,6 +510,21 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
             `Valid variation ids: ${[...known].join(", ") || "(none — this product has no variants)"}.`,
         );
       }
+
+      const overrides = Object.keys(variation_prices ?? {}).length;
+      const decision = confirmWrite(
+        server,
+        ctx,
+        "sync_product",
+        args,
+        `Publish ${product?.name ? `"${product.name}" (#${product_id})` : `product #${product_id}`} to your store?\n` +
+          `Selling price: ${selling_price} ${currency ?? "(your store's currency)"}\n` +
+          `Wholesale cost: ${fmtPrice(product?.price)}` +
+          (pairs.length ? `\nVariants: ${pairs.length}${overrides ? `, ${overrides} with their own price` : ""}` : ""),
+      );
+      if (decision === "declined" || decision === "cancelled")
+        return notConfirmed(decision, { product_id }, "nothing was synced to the store");
+      if (decision !== "go") return decision;
 
       const body: Record<string, unknown> = { product_id, default_store_markup: selling_price, currency, lang };
       if (pairs.length) {
@@ -370,9 +547,10 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         "Get your store's sync health (healthy / degraded / disabled), per-status counts and the failing products with " +
         "their error class. Requires HERTWILL_API_KEY.",
       inputSchema: z.object({}),
+      outputSchema: out.syncHealthOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    run(async () => (await client.request<any>("GET", "/v1/sync/health", { requireKey: true })).data),
+    run(async () => (await client.request<any>("GET", "/v1/sync/health", { requireKey: true })).data ?? {}),
   );
 
   server.registerTool(
@@ -385,11 +563,12 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
         page,
         per_page: perPage,
       }),
+      outputSchema: out.listSyncJobsOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async (q) => {
       const res: any = await client.request("GET", "/v1/sync/jobs", { query: q as Query, requireKey: true });
-      return { data: res.data, pagination: res.meta?.pagination };
+      return { data: res.data ?? [], pagination: res.meta?.pagination };
     }),
   );
 
@@ -399,10 +578,11 @@ export function registerTools(server: McpServer, client: HertwillClient): void {
       title: "Get product sync status",
       description: "Get the sync status of one product in your store. Requires HERTWILL_API_KEY.",
       inputSchema: z.object({ product_id: z.number().int().describe("Catalog product id.") }),
+      outputSchema: out.syncStatusOutput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     run(async ({ product_id }) =>
-      (await client.request<any>("GET", `/v1/sync/jobs/${product_id}`, { requireKey: true })).data,
+      (await client.request<any>("GET", `/v1/sync/jobs/${product_id}`, { requireKey: true })).data ?? {},
     ),
   );
 }
