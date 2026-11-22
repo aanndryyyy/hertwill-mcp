@@ -1,0 +1,3576 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hertwill Public API",
+    "description": "Public API for Hertwill dropshipping platform. Discover products, manage your import list, and sync products to your store.\n\n## Authentication\n\n**Public endpoints** (product discovery) require no authentication.\n\n**Authenticated endpoints** (import list, sync) require a store-scoped API key:\n```\nAuthorization: Bearer hw_live_...\n```\n\nCreate API keys via the web dashboard or the `/v1/api-keys` endpoint (requires JWT login).\n\n## Rate Limits\n\n- Public endpoints: 60 requests/minute per IP\n- Authenticated endpoints: 300 requests/minute per API key\n\nRate limit information is included in responses via the `RateLimit` and `RateLimit-Policy` headers (draft-8 combined format).\n",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Hertwill API Support",
+      "email": "support@hertwill.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.hertwill.com",
+      "description": "Production"
+    }
+  ],
+  "security": [],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Register, login, and refresh tokens"
+    },
+    {
+      "name": "Products",
+      "description": "Browse and search the product catalog (public, no auth required)"
+    },
+    {
+      "name": "Categories",
+      "description": "Product categories (public)"
+    },
+    {
+      "name": "Brands",
+      "description": "Brand listing (public)"
+    },
+    {
+      "name": "Import List",
+      "description": "Manage your store's import list (API key required)"
+    },
+    {
+      "name": "Sync",
+      "description": "Sync products to your connected store (API key required)"
+    },
+    {
+      "name": "API Keys",
+      "description": "Manage API keys (JWT auth required)"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Store-scoped API key (hw_live_...)"
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "JWT token from login"
+      }
+    },
+    "schemas": {
+      "StoreSyncHealth": {
+        "type": "object",
+        "required": [
+          "store_id",
+          "health",
+          "counts"
+        ],
+        "properties": {
+          "store_id": {
+            "type": "integer",
+            "description": "Internal store identifier."
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "disabled"
+            ],
+            "description": "Store-level health (see §2)."
+          },
+          "counts": {
+            "type": "object",
+            "description": "Per-store product totals by status bucket (see §4).",
+            "properties": {
+              "synced": {
+                "type": "integer"
+              },
+              "syncing": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "pending": {
+                "type": "integer"
+              }
+            }
+          },
+          "products": {
+            "type": "array",
+            "description": "The sync-failed product subset only (not the full catalog). Bounded to document safe response expectations for stores with many failures.",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/ProductSyncStatus"
+            }
+          }
+        }
+      },
+      "ProductSyncStatus": {
+        "type": "object",
+        "required": [
+          "external_id",
+          "status"
+        ],
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "The remote-platform product id (DropshipProduct.external_id). Null before first sync."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "synced",
+              "syncing",
+              "sync-failed",
+              "approved",
+              "pending",
+              "rejected",
+              "approval-required"
+            ],
+            "description": "Per-product sync status (see §1)."
+          },
+          "error_class": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "PRODUCT_NOT_FOUND",
+              "STORE_UNAVAILABLE",
+              "STORE_NOT_FOUND",
+              "SHOPIFY_VARIANT_LIMIT",
+              "RATE_LIMITED",
+              "AUTH_FAILED",
+              "PRICE_BELOW_COST",
+              "UNKNOWN"
+            ],
+            "description": "Derived failure classification (see §3). Non-null only when status is sync-failed. Never the raw error payload.\n"
+          },
+          "last_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last successful sync. Presence ⇒ status synced."
+          },
+          "start_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Sync run started. Set with null last_sync_date ⇒ status syncing."
+          },
+          "end_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Sync run finished (success or failure)."
+          }
+        }
+      },
+      "Product": {
+        "type": "object",
+        "description": "GET /v1/products and /v1/products/search return the search-index subset. The product-data fields (mpn, recommended_retail_price, country_of_origin, weight_g, shipping_weight_g, dimensions_mm, net_content, material, fibre_composition, ships_from_country, packages, multipack_quantity, is_bundle, price_updated_at, inventory_updated_at, battery, ingredients, recommended_age_group, sales_window, dispatch_days, returns, warranty, size_guide, usage_instructions, care_instructions, safety_warnings, documents, languages, image_details) are on the detail and slug endpoints only. GET /v1/products/slug/{slug} omits brand, collections, categories and shipping_regions.",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "sku": {
+            "type": "string"
+          },
+          "gtin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTIN (EAN/UPC barcode) of a product WITHOUT variations. `null` when unknown, and always `null` for a variable product — its barcodes live on `variations[].gtin`. Returned by every product endpoint; on GET /v1/products and GET /v1/products/search it comes from the search index and is `null` for variable products there too."
+          },
+          "price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Wholesale Price in EUR (excl. VAT) — the single price charged to merchants. Login-gated: `null` unless the request carries a valid API key (`Authorization: Bearer hw_live_...`). When null, see the response's `meta.pricing` for the reason."
+          },
+          "sale_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Optional temporary sale price (EUR, excl. VAT). When set and lower than `price`, it is the effective wholesale price charged. Login-gated like `price` (`null` for keyless callers)."
+          },
+          "stock": {
+            "type": "integer",
+            "nullable": true
+          },
+          "stock_status": {
+            "type": "string",
+            "enum": [
+              "instock",
+              "outofstock"
+            ]
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Brand"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "images": {
+            "type": "object",
+            "properties": {
+              "featured": {
+                "type": "string",
+                "nullable": true
+              },
+              "gallery": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "variations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Variation"
+            }
+          },
+          "category": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "slug": {
+                "type": "string"
+              }
+            }
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "categories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "The category's path from the top level down to `category` (breadcrumbs). GET /v1/products/{id} only.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "sellable_countries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$"
+            },
+            "description": "ISO 3166-1 alpha-2 countries this product can be sold to: its price list has a priced lane there and neither the brand nor the product excludes the country. `shipping_regions` is derived from this set. `null` while not computed yet. On list/search it comes from the search index and may lag a brand or price-list edit by up to a day. Filter with `ships_to`.",
+            "example": [
+              "DE",
+              "EE",
+              "FI",
+              "GB"
+            ]
+          },
+          "shipping_regions": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "attributes": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "mpn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manufacturer part number: the brand's own product code. Detail and slug endpoints only, like every product-data field below."
+          },
+          "recommended_retail_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "The brand's recommended retail price in EUR (incl. VAT), from its own shop. Public, unlike the Wholesale Price."
+          },
+          "country_of_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Z]{2}$",
+            "description": "Where the item is manufactured (customs origin), ISO 3166-1 alpha-2."
+          },
+          "weight_g": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Weight of the item itself, in grams."
+          },
+          "shipping_weight_g": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Packed weight as shipped, in grams."
+          },
+          "dimensions_mm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Dimensions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Assembled item, in millimetres; `null` when no dimension is known."
+          },
+          "net_content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetContent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Net content (125 ml, 250 g), for unit pricing."
+          },
+          "material": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Primary material (oak, cotton, silicone)."
+          },
+          "fibre_composition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Textile fibre composition, e.g. \"95 % cotton, 5 % elastane\"."
+          },
+          "ships_from_country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Z]{2}$",
+            "description": "Where the order is physically dispatched from, ISO 3166-1 alpha-2. `null` when not recorded."
+          },
+          "packages": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Package"
+            },
+            "description": "The cartons the item ships in, one entry per carton."
+          },
+          "multipack_quantity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Identical items in one sellable unit (a 6-pack is 6)."
+          },
+          "is_bundle": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Different products sold together as one set (a gift set)."
+          },
+          "price_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the Wholesale Price last changed. Not populated yet, `null` today."
+          },
+          "inventory_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the stock last changed. Not populated yet, `null` today."
+          },
+          "battery": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Whether the item contains or comes with a battery (carriers restrict lithium).",
+            "properties": {
+              "included": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Battery type, e.g. \"AA\" or \"lithium-ion\"."
+              }
+            }
+          },
+          "ingredients": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cosmetics only, the INCI ingredient list."
+          },
+          "recommended_age_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Shopify Standard Product Taxonomy age group value, e.g. \"3 years or older\". `null` while not recorded."
+          },
+          "sales_window": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "A seasonal or limited product's sales period; `null` when it sells all year.",
+            "properties": {
+              "start": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              },
+              "end": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              }
+            }
+          },
+          "dispatch_days": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Business days from order to dispatch: the product's own value, else its brand's default. `made_to_order` is true when the item is made after the order. `null` when nothing is recorded.",
+            "properties": {
+              "min": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "max": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "made_to_order": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          },
+          "returns": {
+            "description": "The brand's returns; `null` when the product has no known brand.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Returns"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "warranty": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "months": {
+                "type": "integer"
+              },
+              "terms": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "size_guide": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "A link to the brand's size guide, a size table (rows of cells), or both.",
+            "properties": {
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "table": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "usage_instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How to use the item."
+          },
+          "care_instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Washing and cleaning instructions."
+          },
+          "safety_warnings": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Safety warnings, in English."
+          },
+          "documents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "Manuals, assembly guides, safety sheets and declarations of conformity.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "assembly",
+                    "manual",
+                    "safety_sheet",
+                    "declaration_of_conformity",
+                    "other"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                },
+                "language": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "ISO 639-1, lower case."
+                }
+              }
+            }
+          },
+          "languages": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Languages (ISO 639-1, lower case) on the packaging, in the instructions and in the safety information. `null` when none is recorded.",
+            "properties": {
+              "packaging": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "instructions": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "safety_information": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "image_details": {
+            "type": "array",
+            "description": "The product's stored images in gallery order (featured first, the order `images` lists them), with pixel size, alt text and the 800 / 1600 px renders.",
+            "items": {
+              "$ref": "#/components/schemas/ImageDetail"
+            }
+          }
+        }
+      },
+      "Returns": {
+        "type": "object",
+        "description": "The published returns policy for this brand (hertwill.com/resources/returns-refunds). `accepted` is false for the brands that take no returns; the merchant handles those returns themselves. `window_days` and `shipping_cost` are `null` then, and also for a brand that runs its own returns (its terms, not Hertwill's).",
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "window_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Days from the order date to return an unused item."
+          },
+          "shipping_cost": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "same_as_shipping",
+              null
+            ],
+            "description": "The return label costs what the outbound shipping cost."
+          }
+        }
+      },
+      "DayRange": {
+        "type": "object",
+        "properties": {
+          "min": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "ImageDetail": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "size": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Pixel size of the stored file; `null` until it has been read.",
+            "properties": {
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            }
+          },
+          "alt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Alt text, \"<brand> <product name>\" plus \", photo N\" after the first image."
+          },
+          "sizes": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Renders keyed by the longer side in pixels; `null` for a file not on our image host.",
+            "properties": {
+              "800": {
+                "type": "string"
+              },
+              "1600": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Variation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sku": {
+            "type": "string"
+          },
+          "gtin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTIN (EAN/UPC barcode) of this variation; `null` when unknown. Present on the detail and slug endpoints (list/search responses carry no variations)."
+          },
+          "price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Wholesale Price in EUR (excl. VAT) — the single price charged to merchants. Login-gated: `null` unless the request carries a valid API key. See the response's `meta.pricing`."
+          },
+          "sale_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Optional temporary sale price (EUR, excl. VAT). Login-gated like `price` (`null` for keyless callers)."
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          },
+          "stock": {
+            "type": "integer",
+            "nullable": true
+          },
+          "stock_status": {
+            "type": "string"
+          },
+          "attributes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "mpn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manufacturer part number: the brand's own product code. `null` means as the product."
+          },
+          "recommended_retail_price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "The brand's recommended retail price in EUR (incl. VAT), from its own shop. Public, unlike the Wholesale Price. `null` means as the product."
+          },
+          "country_of_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Z]{2}$",
+            "description": "Where the item is manufactured (customs origin), ISO 3166-1 alpha-2. `null` means as the product."
+          },
+          "weight_g": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Weight of the item itself, in grams. `null` means as the product."
+          },
+          "shipping_weight_g": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Packed weight as shipped, in grams. `null` means as the product."
+          },
+          "dimensions_mm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Dimensions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Assembled variant, in millimetres. `null` means as the product; an inner `null` means that axis is as the product."
+          },
+          "net_content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetContent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Net content (125 ml, 250 g), for unit pricing. `null` means as the product."
+          },
+          "material": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Primary material (oak, cotton, silicone). `null` means as the product."
+          },
+          "fibre_composition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Textile fibre composition, e.g. \"95 % cotton, 5 % elastane\". `null` means as the product."
+          }
+        }
+      },
+      "Dimensions": {
+        "type": "object",
+        "properties": {
+          "length": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "NetContent": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "number"
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "mg",
+              "g",
+              "kg",
+              "ml",
+              "cl",
+              "l",
+              "cm",
+              "m",
+              "sqm",
+              "cbm",
+              "ct",
+              null
+            ]
+          }
+        }
+      },
+      "Package": {
+        "type": "object",
+        "properties": {
+          "length_mm": {
+            "type": "integer"
+          },
+          "width_mm": {
+            "type": "integer"
+          },
+          "height_mm": {
+            "type": "integer"
+          },
+          "weight_g": {
+            "type": "integer"
+          }
+        }
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "parent_id": {
+                  "type": "string",
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "Brand": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "logo": {
+            "type": "string",
+            "nullable": true,
+            "description": "URL of the brand logo image."
+          },
+          "cover": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL of the brand cover/banner image."
+          },
+          "marketing_assets_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Link to the brand's downloadable marketing materials (banners, promo images, product photography) for use in your store."
+          },
+          "gpsr": {
+            "description": "EU GPSR (General Product Safety Regulation) responsible-person contact for this brand's supplier. `null` when no record is on file, or when the request is not authenticated with an API key (this field is only populated for API-key-authenticated callers).",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "company_name": {
+                "type": "string",
+                "description": "Legal/company name of the responsible person."
+              },
+              "email": {
+                "type": "string",
+                "description": "Contact email of the responsible person."
+              },
+              "address": {
+                "type": "string",
+                "description": "Postal address of the responsible person."
+              }
+            }
+          },
+          "responsible_person": {
+            "description": "The brand's responsible person in the EU, for a brand based outside the EU. API-key callers only, like `gpsr`; `null` otherwise or when not on file.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "company_name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              }
+            }
+          },
+          "return_policy": {
+            "description": "The brand's returns. API-key callers only; `null` otherwise.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Returns"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dispatch_days": {
+            "description": "The brand's default business days from order to dispatch (a product may override it). API-key callers only; `null` otherwise or when not recorded.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DayRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "media_rights": {
+            "description": "How shops may use the brand's photos. API-key callers only.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "terms": {
+                "type": "string"
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "has_gtins": {
+            "description": "Whether the brand's products carry GTINs at all. API-key callers only.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "channels": {
+            "description": "Where the brand allows its products to be sold, per channel (amazon, ebay, etsy, bol, zalando, tiktok_shop, own_store); a channel left out is unknown. API-key callers only.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "allowed",
+                    "blocked",
+                    "unknown"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "private_label": {
+            "description": "Whether the brand makes private-label versions. API-key callers only.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "available": {
+                "type": "string",
+                "enum": [
+                  "yes",
+                  "no",
+                  "on_request"
+                ]
+              },
+              "min_quantity": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ShippingPrice": {
+        "type": "object",
+        "description": "A single origin→destination shipping rate lane.",
+        "properties": {
+          "id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "origin_iso_code": {
+            "type": "string",
+            "description": "ISO-2 origin country code (the brand's shipping origin)."
+          },
+          "dest_iso_code": {
+            "type": "string",
+            "description": "ISO-2 destination country code."
+          },
+          "price": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Shipping price for this lane in EUR. `null` when no rate is defined for the destination, OR when the caller is not API-key-authenticated (login-gated like product pricing — see the response's `meta.pricing`)."
+          },
+          "origin_country": {
+            "type": "string",
+            "description": "Human-readable origin country name."
+          },
+          "destination_country": {
+            "type": "string",
+            "description": "Human-readable destination country name."
+          },
+          "delivery_days": {
+            "description": "Business days in transit on this lane, after dispatch; `null` while not recorded.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DayRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ShippingPriceList": {
+        "type": "object",
+        "description": "A brand's shipping price list. The `name` is a coverage tag (e.g. \"EU\", \"EU · UK · USA\"). `shipping_prices` holds one rate per origin→destination lane.",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string",
+            "description": "Coverage tag for the list (e.g. \"EU\", \"EU · UK · USA\")."
+          },
+          "per_item": {
+            "type": "boolean",
+            "description": "True when the brand has at least one public product on this list that ships per item (large/extra-large size class), so shipping is charged per unit rather than once per order."
+          },
+          "shipping_prices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShippingPrice"
+            }
+          }
+        }
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer"
+          },
+          "per_page": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "PricingMeta": {
+        "type": "object",
+        "description": "Present in `meta` on every price-bearing response (products, product search, product detail, brand shipping price-lists). Tells you whether wholesale prices were included and, when withheld, how to unlock them. Lets you distinguish \"no price on file\" (a real `null` field) from \"price withheld — authenticate\" (this envelope, `included: false`).",
+        "properties": {
+          "authenticated": {
+            "type": "boolean",
+            "description": "Whether the request carried a valid API key."
+          },
+          "included": {
+            "type": "boolean",
+            "description": "Whether wholesale prices were included in this response. `false` means every price field is `null` because the caller is unauthenticated. `true` means prices are included — though an individual field may still be a genuine `null` (e.g. no sale price, or no rate for a shipping lane)."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "authentication_required"
+            ],
+            "description": "Why pricing was withheld. Only present when `included` is false."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation and how to authenticate. Only present when `included` is false."
+          }
+        },
+        "required": [
+          "authenticated",
+          "included"
+        ]
+      },
+      "ImportListItem": {
+        "type": "object",
+        "description": "A product staged in the user's import list. `id` is the upstream\nHertwill catalog product id — pass it as `product_id` to\nsync_products / get_sync_jobs. `product_id` is the storefront-side\nimport-list record id (internal bookkeeping; no public endpoint\naccepts it). `status` is the sync lifecycle state for this item.\n",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Upstream Hertwill catalog product id. This is the value to send as `product_id` to POST /v1/sync/products and GET /v1/sync/jobs/{productId}."
+          },
+          "product_id": {
+            "type": "integer",
+            "description": "Storefront-side import-list record id (internal bookkeeping — NOT accepted by the sync endpoints; use `id` there)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "sku": {
+            "type": "string"
+          },
+          "gtin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTIN (EAN/UPC barcode) of a product WITHOUT variations. `null` when unknown, and always `null` for a variable product — its barcodes live on `variations[].gtin`."
+          },
+          "slug": {
+            "type": "string"
+          },
+          "price": {
+            "type": "number",
+            "description": "Wholesale Price in EUR (excl. VAT) — what the merchant pays Hertwill for the product."
+          },
+          "sale_price": {
+            "type": "number",
+            "nullable": true,
+            "description": "Optional temporary sale price (EUR, excl. VAT). When set and lower than `price`, it is the effective wholesale price charged."
+          },
+          "stock": {
+            "type": "integer",
+            "nullable": true
+          },
+          "stock_status": {
+            "type": "string",
+            "enum": [
+              "instock",
+              "outofstock"
+            ]
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Brand"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "$ref": "#/components/schemas/Category",
+            "nullable": true
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "images": {
+            "type": "object",
+            "properties": {
+              "featured": {
+                "type": "string",
+                "nullable": true
+              },
+              "gallery": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "currency": {
+            "type": "string"
+          },
+          "lang": {
+            "type": "string"
+          },
+          "default_store_markup": {
+            "type": "number",
+            "nullable": true,
+            "description": "The merchant's ABSOLUTE selling price for this product in the store currency — not a markup multiplier or percentage."
+          },
+          "variations": {
+            "type": "array",
+            "description": "This store's import-list variation records. Each entry pairs the catalog variation id (`id` — the same value as `variations[].id` in GET /v1/products/{id}) with its import-list record id (`dropship_id`). POST /v1/sync/products requires BOTH values per variation. The complete PAIRING appears only here and in the POST /v1/import-list/products `variations` array (its `variation_ids` field carries unpaired record ids for freshly-inserted rows only), and it is NOT positional — always read it, never infer it. Empty for simple products. Note this endpoint's default `status=not-synced` filter — pass an explicit `status` to find already-synced products.",
+            "items": {
+              "$ref": "#/components/schemas/ImportListVariation"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not-synced",
+              "syncing",
+              "synced",
+              "sync-failed",
+              "approved",
+              "rejected",
+              "pending",
+              "approval-required"
+            ],
+            "description": "Sync lifecycle status (formerly `sync_status`)."
+          },
+          "added_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "last_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "start_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "end_sync_date": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ImportListVariation": {
+        "type": "object",
+        "description": "One import-list variation record: the (catalog variation id, import-list record id) pair that POST /v1/sync/products requires in `variations[]`. `sku` and `gtin` are included so the mapping can be verified independently.",
+        "required": [
+          "id",
+          "dropship_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Catalog variation id — matches `variations[].id` in GET /v1/products/{id}. Send as `variations[].id` when syncing."
+          },
+          "dropship_id": {
+            "type": "integer",
+            "description": "Import-list record id for this variation in YOUR store. Send as `variations[].dropship_id` when syncing. Its pairing with `id` is not derivable from any other field — always read the pair from a `variations` array."
+          },
+          "sku": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The variation's SKU, for verifying the mapping."
+          },
+          "gtin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTIN (EAN/UPC barcode) of this variation; `null` when unknown."
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "request_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "page": {
+        "name": "page",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1
+        }
+      },
+      "per_page": {
+        "name": "per_page",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "sort_by": {
+        "name": "sort_by",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "price",
+            "date",
+            "sales"
+          ]
+        }
+      },
+      "sort_order": {
+        "name": "sort_order",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/auth/register": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Register a new account",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "password",
+                  "first_name",
+                  "last_name"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 128
+                  },
+                  "first_name": {
+                    "type": "string"
+                  },
+                  "last_name": {
+                    "type": "string"
+                  }
+                }
+              },
+              "example": {
+                "email": "user@example.com",
+                "password": "securepass123",
+                "first_name": "John",
+                "last_name": "Doe"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registration successful, verification email sent"
+          },
+          "409": {
+            "description": "Email already in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error (invalid email, password too short, missing fields)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Login and get JWT token",
+        "description": "Returns a JWT token and refresh token. Use the JWT token as `Authorization: Bearer <token>`\nto create API keys via `/v1/api-keys`.\n",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                }
+              },
+              "example": {
+                "email": "user@example.com",
+                "password": "securepass123"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string",
+                          "description": "JWT token (expires in 1 hour)"
+                        },
+                        "refresh_token": {
+                          "type": "string",
+                          "description": "Refresh token (use to get a new JWT)"
+                        },
+                        "user": {
+                          "type": "object",
+                          "description": "User profile and store data"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Email not verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error (invalid email format, missing password)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Refresh JWT token",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "refresh_token"
+                ],
+                "properties": {
+                  "refresh_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New token pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string"
+                        },
+                        "refresh_token": {
+                          "type": "string"
+                        },
+                        "user": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired refresh token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error (missing refresh_token)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/products": {
+      "get": {
+        "tags": [
+          "Products"
+        ],
+        "summary": "Browse products",
+        "description": "List products with faceted filtering, sorting, and pagination.\nNote: variations are not included in list responses. Use GET /v1/products/{id} to get full product details with variations.\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/per_page"
+          },
+          {
+            "$ref": "#/components/parameters/sort_by"
+          },
+          {
+            "$ref": "#/components/parameters/sort_order"
+          },
+          {
+            "name": "brand",
+            "in": "query",
+            "description": "Filter by brand slug",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Filter by category slug",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "min_price",
+            "in": "query",
+            "description": "Minimum price filter (EUR)",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "max_price",
+            "in": "query",
+            "description": "Maximum price filter (EUR)",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "on_sale",
+            "in": "query",
+            "description": "Filter to products on sale",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "stock_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "instock",
+                "outofstock"
+              ]
+            }
+          },
+          {
+            "name": "shipping_region",
+            "in": "query",
+            "description": "Filter by shipping region",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ships_to",
+            "in": "query",
+            "description": "Only products that can be sold to this country (ISO 3166-1 alpha-2, matched against `sellable_countries`).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z]{2}$"
+            },
+            "example": "DE"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "description": "Comma-separated attribute values to filter by",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated product list with facets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Product"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pagination": {
+                          "$ref": "#/components/schemas/Pagination"
+                        },
+                        "facets": {
+                          "type": "array",
+                          "description": "Counts per value for brand, collection, category, shipping_regions, sellable_countries, attributes, attribute_values and stock_status, within the current filters."
+                        },
+                        "pricing": {
+                          "$ref": "#/components/schemas/PricingMeta"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": 123,
+                      "slug": "organic-cotton-tshirt",
+                      "name": "Organic Cotton T-Shirt",
+                      "sku": "OCT-001",
+                      "description": "Premium organic cotton t-shirt",
+                      "brand": {
+                        "id": "5",
+                        "name": "EcoWear",
+                        "slug": "ecowear",
+                        "description": null
+                      },
+                      "price": null,
+                      "sale_price": null,
+                      "stock": 50,
+                      "stock_status": "instock",
+                      "images": {
+                        "featured": "https://cdn.hertwill.com/products/123.jpg",
+                        "gallery": []
+                      },
+                      "category": {
+                        "id": 1,
+                        "name": "Apparel",
+                        "slug": "apparel"
+                      },
+                      "collections": [
+                        {
+                          "id": 10,
+                          "name": "Summer 2026",
+                          "slug": "summer-2026"
+                        }
+                      ]
+                    }
+                  ],
+                  "meta": {
+                    "pagination": {
+                      "page": 1,
+                      "per_page": 50,
+                      "total": 234,
+                      "page_count": 5
+                    },
+                    "pricing": {
+                      "authenticated": false,
+                      "included": false,
+                      "reason": "authentication_required",
+                      "message": "price and sale_price are null because wholesale pricing is available only to authenticated callers. Send a valid API key as `Authorization: Bearer hw_live_...` to receive prices."
+                    },
+                    "request_id": "550e8400-e29b-41d4-a716-446655440000"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/products/search": {
+      "get": {
+        "tags": [
+          "Products"
+        ],
+        "summary": "Search products",
+        "description": "Hybrid keyword and semantic search for intelligent product matching.\nSupports all the same filters as the browse endpoint.\nNote: variations are not included in search results. Use GET /v1/products/{id} to get full product details with variations.\n",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query (e.g., \"organic cotton tshirt\", \"blue running shoes\")",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/per_page"
+          },
+          {
+            "$ref": "#/components/parameters/sort_by"
+          },
+          {
+            "$ref": "#/components/parameters/sort_order"
+          },
+          {
+            "name": "brand",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "min_price",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "max_price",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "on_sale",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "stock_status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "instock",
+                "outofstock"
+              ]
+            }
+          },
+          {
+            "name": "shipping_region",
+            "in": "query",
+            "description": "Filter by shipping region",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ships_to",
+            "in": "query",
+            "description": "Only products that can be sold to this country (ISO 3166-1 alpha-2, matched against `sellable_countries`).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z]{2}$"
+            },
+            "example": "DE"
+          },
+          {
+            "name": "attributes",
+            "in": "query",
+            "description": "Comma-separated attribute values to filter by",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results with facets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Product"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pagination": {
+                          "$ref": "#/components/schemas/Pagination"
+                        },
+                        "facets": {
+                          "type": "array",
+                          "description": "Counts per value for brand, collection, category, shipping_regions, sellable_countries, attributes, attribute_values and stock_status, within the current filters."
+                        },
+                        "pricing": {
+                          "$ref": "#/components/schemas/PricingMeta"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/products/{id}": {
+      "get": {
+        "tags": [
+          "Products"
+        ],
+        "summary": "Get product by ID",
+        "description": "Retrieve a single product by its numeric ID. Falls back to slug lookup if not numeric.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "description": "Return the description in this language (upper case; lower case is also accepted). Names are not translated. Without a translation the stored description comes back; `meta.lang` names the language returned.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "EN",
+                "BG",
+                "CZ",
+                "DE",
+                "DK",
+                "EE",
+                "ES",
+                "FI",
+                "FR",
+                "GR",
+                "HR",
+                "HU",
+                "IT",
+                "LT",
+                "LV",
+                "NL",
+                "PL",
+                "PT",
+                "RO",
+                "SE",
+                "SK"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Product"
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pricing": {
+                          "$ref": "#/components/schemas/PricingMeta"
+                        },
+                        "lang": {
+                          "type": "string",
+                          "description": "The language `description` is in: the requested `lang` when a translation exists, else `EN`."
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters (a `lang` outside the listed codes)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/products/slug/{slug}": {
+      "get": {
+        "tags": [
+          "Products"
+        ],
+        "summary": "Get product by slug",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "description": "Return the description in this language (upper case; lower case is also accepted). Names are not translated. Without a translation the stored description comes back; `meta.lang` names the language returned.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "EN",
+                "BG",
+                "CZ",
+                "DE",
+                "DK",
+                "EE",
+                "ES",
+                "FI",
+                "FR",
+                "GR",
+                "HR",
+                "HU",
+                "IT",
+                "LT",
+                "LV",
+                "NL",
+                "PL",
+                "PT",
+                "RO",
+                "SE",
+                "SK"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Product"
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pricing": {
+                          "$ref": "#/components/schemas/PricingMeta"
+                        },
+                        "lang": {
+                          "type": "string",
+                          "description": "The language `description` is in: the requested `lang` when a translation exists, else `EN`."
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters (a `lang` outside the listed codes)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "summary": "List categories",
+        "responses": {
+          "200": {
+            "description": "List of categories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Category"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/categories/{id}": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "summary": "Get category by ID or slug",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Category ID (numeric) or slug",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Category details with children",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Category"
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Category not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/brands": {
+      "get": {
+        "tags": [
+          "Brands"
+        ],
+        "summary": "List brands",
+        "description": "List all brands, including their marketing material links (`logo`, `cover`, `marketing_assets_url`) and shipping origin country.",
+        "responses": {
+          "200": {
+            "description": "List of brands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Brand"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/brands/{id}": {
+      "get": {
+        "tags": [
+          "Brands"
+        ],
+        "operationId": "getBrandById",
+        "summary": "Get brand by ID",
+        "description": "Retrieve a single brand, including its marketing material links (`logo`, `cover`, `marketing_assets_url`) and shipping origin country.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Brand ID (numeric).",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Brand details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Brand"
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Brand not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/brands/{id}/shipping-price-lists": {
+      "get": {
+        "tags": [
+          "Brands"
+        ],
+        "operationId": "getBrandShippingPriceLists",
+        "summary": "Get a brand's shipping price lists",
+        "description": "Returns the brand's shipping price lists (coverage tag + per origin→destination rate), same as the storefront. Use these rates to estimate delivery costs to your customers before importing a brand's products.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Brand ID (numeric).",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The brand's shipping price lists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ShippingPriceList"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pricing": {
+                          "$ref": "#/components/schemas/PricingMeta"
+                        },
+                        "request_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Brand not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/import-list": {
+      "get": {
+        "tags": [
+          "Import List"
+        ],
+        "summary": "List import list products",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/per_page"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filters the list to one status slice per call. When omitted, defaults to `not-synced` — products not yet synced to your store. Already-synced products are therefore absent from the default response; request them with `status=synced`. The `synced` and `not-synced` slices are exact complements, so the two together cover the complete import list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "not-synced",
+                "syncing",
+                "synced",
+                "sync-failed",
+                "approved",
+                "rejected",
+                "pending",
+                "approval-required"
+              ],
+              "default": "not-synced"
+            }
+          },
+          {
+            "name": "order_by",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "added_dt",
+                "name",
+                "price"
+              ],
+              "default": "added_dt"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "desc"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Import list products",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ImportListItem"
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "pagination": {
+                          "$ref": "#/components/schemas/Pagination"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Store not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/import-list/products": {
+      "post": {
+        "tags": [
+          "Import List"
+        ],
+        "summary": "Add products to import list",
+        "description": "Add one or more products to your store's import list. Max 50 products per request.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "product_ids"
+                ],
+                "properties": {
+                  "product_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "Product IDs to add"
+                  }
+                }
+              },
+              "example": {
+                "product_ids": [
+                  123,
+                  456,
+                  789
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Products added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "product_id": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "added",
+                              "already_exists",
+                              "not_found",
+                              "error"
+                            ]
+                          },
+                          "parent_id": {
+                            "type": "integer"
+                          },
+                          "variation_ids": {
+                            "type": "array",
+                            "description": "Record ids of variation rows CREATED by this call only (rows that already existed are omitted) — use `variations` for the complete, paired set.",
+                            "items": {
+                              "type": "integer"
+                            }
+                          },
+                          "variations": {
+                            "type": "array",
+                            "description": "ALL of this store's import-list variation records for the product (present on `added` and `already_exists`), pairing each catalog variation id with its `dropship_id` for POST /v1/sync/products. The pairing is NOT positional — never infer it from array order.",
+                            "items": {
+                              "$ref": "#/components/schemas/ImportListVariation"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "product_id": 123,
+                      "status": "added",
+                      "parent_id": 1001,
+                      "variation_ids": [
+                        2001,
+                        2002
+                      ],
+                      "variations": [
+                        {
+                          "id": 151,
+                          "dropship_id": 2001,
+                          "sku": "2075-51",
+                          "gtin": "5901234123457"
+                        },
+                        {
+                          "id": 152,
+                          "dropship_id": 2002,
+                          "sku": "2075-50",
+                          "gtin": null
+                        }
+                      ]
+                    },
+                    {
+                      "product_id": 456,
+                      "status": "already_exists",
+                      "variations": [
+                        {
+                          "id": 310,
+                          "dropship_id": 1544,
+                          "sku": "ABC-1",
+                          "gtin": null
+                        }
+                      ]
+                    },
+                    {
+                      "product_id": 789,
+                      "status": "not_found"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request body (product_ids must be a non-empty array of integers, max 50)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/import-list/products/{productId}": {
+      "delete": {
+        "tags": [
+          "Import List"
+        ],
+        "summary": "Remove product from import list",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "productId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product removed"
+          },
+          "400": {
+            "description": "Invalid product ID format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found in import list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/products": {
+      "post": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Start product sync",
+        "description": "Trigger sync of a product from your import list to your connected store (Shopify/WooCommerce).\nThe product must already be in your import list.\n\n**Prerequisites:**\n- Your store must have a Shopify or WooCommerce integration connected. Set one up at [hertwill.com/account/integration](https://hertwill.com/account/integration).\n- Your store must not have reached its product sync capacity. If you hit the limit, upgrade your plan at [hertwill.com/account/plans](https://hertwill.com/account/plans).\n",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "product_id",
+                  "default_store_markup"
+                ],
+                "properties": {
+                  "product_id": {
+                    "type": "integer",
+                    "description": "Catalog product id — the `id` field of an ImportListItem (NOT its `product_id` record id)."
+                  },
+                  "default_store_markup": {
+                    "type": "number",
+                    "description": "Your ABSOLUTE selling price for the product in your store's currency (e.g. 24.99) — NOT a markup multiplier or percentage. A value below the wholesale `price` is rejected with 422 PRICE_BELOW_COST (a below-cost price almost always means a multiplier like 1.5 was sent where a price belongs)."
+                  },
+                  "currency": {
+                    "type": "string"
+                  },
+                  "lang": {
+                    "type": "string"
+                  },
+                  "variations": {
+                    "type": "array",
+                    "description": "Required for products with variants — one entry per variant to publish. Read the (id, dropship_id) pairs from the `variations` array on GET /v1/import-list or POST /v1/import-list/products; the pairing is NOT positional, and a mismatched pair is rejected with 422.",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "dropship_id",
+                        "default_store_markup"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "integer",
+                          "description": "Catalog variation id (`variations[].id` on the catalog product)."
+                        },
+                        "dropship_id": {
+                          "type": "integer",
+                          "description": "Import-list record id of the variation — the `dropship_id` paired with this `id` in the import-list `variations` array. Must match; a wrong pair returns 422 VALIDATION_ERROR."
+                        },
+                        "default_store_markup": {
+                          "type": "number",
+                          "description": "Absolute selling price for this variation (same semantics as the top-level field)."
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "example": {
+                "product_id": 123,
+                "default_store_markup": 24.99,
+                "variations": [
+                  {
+                    "id": 151,
+                    "dropship_id": 2001,
+                    "default_store_markup": 24.99
+                  },
+                  {
+                    "id": 152,
+                    "dropship_id": 2002,
+                    "default_store_markup": 24.99
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Sync started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "product_id": {
+                          "type": "integer"
+                        },
+                        "status": {
+                          "type": "string",
+                          "example": "syncing"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "product_id": 123,
+                    "status": "syncing",
+                    "message": "Sync started"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Sync not allowed — store has reached its product sync limit. Upgrade your plan at hertwill.com/account/plans.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found, or product not in import list — add it via POST /v1/import-list/products first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error. Possible causes:\n- No store platform connected — connect at hertwill.com/account/integration.\n- Variations are required but not provided (or provided as an empty\n  array) for a product with variants.\n- PRICE_BELOW_COST: a `default_store_markup` (selling price) is below the\n  product's wholesale `price`. The field is an absolute price, not a\n  markup multiplier — send e.g. 24.99, not 1.5.\n- A `variations[].id` does not belong to the product — use the catalog\n  product's `variations[].id`.\n- A `variations[].dropship_id` does not match the import-list record\n  for that variation, or no import-list record exists for it — read\n  the pairs from the `variations` array on\n  POST /v1/import-list/products (idempotent; re-adding returns the\n  pairs and re-creates any missing variation records).\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The sync could not be queued (transient infrastructure failure). The capacity\nslot was released — retry the request. Re-submitting a product that is already\nqueued or syncing is safe and idempotent (returns 202 \"Sync already in progress\").\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/health": {
+      "get": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Store sync health",
+        "description": "Returns the store-level sync health (healthy / degraded / disabled), per-status counts, and the failing-product subset (each carrying its derived error_class). Scope is always the authenticated API key's store; any client-supplied store_id is ignored. The response exposes only contract-safe derived fields — never the raw error payload or internal columns.\n",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Store sync health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StoreSyncHealth"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Store not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/jobs": {
+      "get": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "List sync jobs",
+        "description": "Returns products by sync status. Omit the status parameter to return all. Use GET /v1/sync/jobs/{productId} to check a specific product.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/per_page"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by sync status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "syncing",
+                "synced",
+                "sync-failed",
+                "not-synced"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of sync jobs"
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Store not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/jobs/{productId}": {
+      "get": {
+        "tags": [
+          "Sync"
+        ],
+        "summary": "Get sync status for a product",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "productId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sync job status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "product_id": {
+                          "type": "integer"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "completed_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "has_errors": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid product ID format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found in store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys": {
+      "post": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Create API key",
+        "description": "Create a new store-scoped API key. Requires JWT authentication (login first).\nThe raw key is returned only once — store it securely.\n",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "store_id"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "A label for this key",
+                    "example": "My CLI Key"
+                  },
+                  "store_id": {
+                    "type": "integer",
+                    "description": "Store to scope this key to"
+                  }
+                }
+              },
+              "example": {
+                "name": "My CLI Key",
+                "store_id": 42
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "API key created (raw key shown only once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "integer"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "prefix": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string",
+                          "description": "The full API key (shown only once)"
+                        },
+                        "store_id": {
+                          "type": "integer"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": 1,
+                    "name": "My CLI Key",
+                    "prefix": "hw_live_a1b2c3d4",
+                    "key": "hw_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+                    "store_id": 42,
+                    "created_at": "2026-04-07T12:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated — login first via POST /v1/auth/login",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "You do not have access to this store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request body (name required, store_id must be a positive integer)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "List API keys",
+        "description": "List all API keys for your stores. Secrets are masked (only prefix shown).",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of API keys"
+          },
+          "401": {
+            "description": "Not authenticated — login first via POST /v1/auth/login",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{id}": {
+      "delete": {
+        "tags": [
+          "API Keys"
+        ],
+        "summary": "Revoke API key",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key revoked"
+          },
+          "400": {
+            "description": "Invalid key ID format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated — login first via POST /v1/auth/login",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "API key not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
